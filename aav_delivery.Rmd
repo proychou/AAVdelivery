@@ -1,0 +1,212 @@
+---
+title: "AAV_delivery"
+author: "Pavitra Roychoudhury"
+date: "1/6/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Quantify in vivo delivery of barcoded AAVs in NHPs
+
+Rather than mapping, perhaps best to directly look for number of reads containing an exact barcode match
+
+```{bash}
+grabnode 
+#cd /fh/fast/jerome_k/AAVs_Dan/RNA
+#module load R/3.6.2-foss-2016b-fh1
+cd /fh/fast/jerome_k/AAVs_Dan/DNA
+ml R/3.6.2-foss-2019b-fh1 #on rhino03
+R --vanilla 
+```
+
+
+```{r}
+rm(list=ls())
+library(ShortRead)
+library(Biostrings)
+library(tidyverse)
+library(parallel)
+ncores<-14
+
+barcode_seqs<-DNAStringSet(c(
+	'CTCGAGGTAAAACGACGGCCAGTAAGGG',
+	'CTCGAGGTAAAACGACGGCCAGATCGTT',
+	'CTCGAGGTAAAACGACGGCCAGACTAAG',
+	'CTCGAGGTAAAACGACGGCCAGAGAAGA',
+	'CTCGAGGTAAAACGACGGCCAGTGTGCA',
+	'CTCGAGGTAAAACGACGGCCAGGCAACT',
+	'CTCGAGGTAAAACGACGGCCAGGTTATC',
+	'CTCGAGGTAAAACGACGGCCAGGACTTG',
+	'CTCGAGGTAAAACGACGGCCAGTTGGAC',
+	'CTCGAGGTAAAACGACGGCCAGGGGTAA',
+	'CTCGAGGTAAAACGACGGCCAGAAGTGT'))
+
+# #first on the pre-processed fastq--RNA
+# fastq_dir<-'/fh/fast/jerome_k/AAVs_Dan/RNA/preprocessed_fastq/'
+# outfname<-'AAVbiodistrib_RNA_results_posttrim.csv'
+
+#then on raw--RNA
+# fastq_dir<-'/fh/fast/jerome_k/AAVs_Dan/RNA/fastq_files/'
+# outfname<-'AAVbiodistrib_RNA_results_pretrim.csv'
+
+# #first on the pre-processed fastq--DNA
+fastq_dir<-'/fh/fast/jerome_k/AAVs_Dan/DNA/preprocessed_fastq/'
+outfname<-'AAVbiodistrib_DNA_results_posttrim.csv'
+
+#then on raw--DNA
+# fastq_dir<-'/fh/fast/jerome_k/AAVs_Dan/DNA/fastq_files/'
+# outfname<-'AAVbiodistrib_DNA_results_pretrim.csv'
+
+
+#counts 
+results<-data.frame(fname_full=list.files(fastq_dir,'.fastq.gz',recursive=T),stringsAsFactors=F) %>% 
+  mutate(samp=str_split(basename(fname_full),'_',simplify=T)[,1])
+animal_id<-unlist(lapply(str_split(results$samp,'-'),function(x){
+  if(length(x)>1)grep('^A[0-9]',x,value=T)else x
+}))
+tissue<-unlist(lapply(str_split(results$samp,'-'),function(x){
+  if(length(x)>1)grep('^[0-9]',x,value=T) else 'NA'
+}))
+results<-cbind(results,animal_id,tissue) %>% 
+  mutate(tot_reads=0)
+results<-cbind(results,matrix(0,nrow=nrow(results),ncol=length(barcode_seqs)));
+names(results)[6:ncol(results)]<-paste0('bc_',substr(barcode_seqs,23,28));
+for(i in 1:nrow(results)){
+	fname<-grep(results$samp[i],list.files(fastq_dir,'.fastq.gz',full.names=T,recursive=T),value=T)
+	print(paste0('file ', i,' of ', nrow(results),'...'))
+	infastq<-readFastq(fname)@sread
+	results$tot_reads[i]<-length(infastq)
+	results[i,6:ncol(results)]<-unlist(mclapply(barcode_seqs,function(bc) sum(vcountPattern(bc,infastq)),mc.cores=ncores));
+	write_csv(results,outfname)
+}
+write_csv(results,outfname)
+```
+
+
+Locally after d/l-ing the results
+```{r}
+library(tidyverse); library(reshape2); options(dplyr.width=Inf)
+
+# res_posttrim<-read_csv('./RNA/AAVbiodistrib_RNA_results_posttrim.csv')
+res_posttrim<-read_csv('./DNA/AAVbiodistrib_DNA_results_posttrim.csv')
+metadata<-read_csv('./sample_metadata.csv')
+
+barcode_lut<-data.frame(
+  bc=c('bc_TAAGGG', 'bc_ATCGTT', 'bc_ACTAAG', 'bc_AGAAGA', 'bc_TGTGCA', 'bc_GCAACT', 
+       'bc_GTTATC', 'bc_GACTTG', 'bc_TTGGAC', 'bc_GGGTAA', 'bc_AAGTGT'),
+  aav=c('AAV2','AAV2-DARPIN','AAV6','AAV6-DARPIN','AAVmLIV1','AAVmLIV3',
+        'AAV8','AAV9','AAVRh10','AAVDJ','AAVDJ8'),
+  stringsAsFactors=F
+)
+
+res_posttrim$tot_allbc<-apply(res_posttrim[,grepl('^bc_',names(res_posttrim))],1,sum)
+res_posttrim_melted<-res_posttrim %>% 
+  melt(id.vars=c('fname_full','samp','animal_id','tissue','tot_reads','tot_allbc')) %>% 
+  group_by(animal_id,tissue) %>% 
+  mutate(tissue_val=metadata$samp_type[match(paste0(animal_id,'-',tissue),metadata$samp_name)],
+         day=metadata$day[match(paste0(animal_id,'-',tissue),metadata$samp_name)],
+         bc=barcode_lut$aav[match(variable,barcode_lut$bc)])
+head(res_posttrim_melted)
+# write_csv(res_posttrim_melted,'./AAVbiodistrib_results_posttrim_melted.csv')
+
+
+
+library(RColorBrewer)
+getPalette = colorRampPalette(brewer.pal(8, "Set1"))
+
+pdf('Control_plots_posttrim.pdf',width=5,height=4)
+ggplot(subset(res_posttrim_melted,tissue%in%c('NA',NA)),
+       aes(x=animal_id,y=value/tot_reads*100))+
+  geom_bar(stat='identity',aes(fill=bc))+
+  scale_fill_manual(values=getPalette(11))+
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=45,hjust=1))+
+  xlab('')+ylab('% of total reads')
+ggplot(subset(res_posttrim_melted,tissue%in%c('NA',NA)),
+       aes(x=animal_id,y=value/tot_allbc*100))+
+  geom_bar(stat='identity',aes(fill=bc))+
+  scale_fill_manual(values=getPalette(11))+
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=45,hjust=1))+
+  xlab('')+ylab('% of total reads with any bc')
+# ggplot(subset(res_posttrim_melted,tissue%in%c('NA',NA)&!animal_id%in%c('PC','NTC','NC')),
+#        aes(x=animal_id,y=value/tot_reads*100))+
+#   geom_bar(stat='identity',aes(fill=bc))+
+#   scale_fill_manual(values=getPalette(11))+
+#   theme_bw()+
+#   theme(axis.text.x=element_text(angle=45,hjust=1))+
+#   xlab('')+ylab('% of total reads')
+# ggplot(subset(res_posttrim_melted,tissue%in%c('NA',NA)&!animal_id%in%c('PC','NTC','NC')),
+#        aes(x=animal_id,y=value/tot_allbc*100))+
+#   geom_bar(stat='identity',aes(fill=bc))+
+#   scale_fill_manual(values=getPalette(11))+
+#   theme_bw()+
+#   theme(axis.text.x=element_text(angle=45,hjust=1))+
+#   xlab('')+ylab('% of total reads with any bc')
+dev.off()
+
+pdf('./D7_biopsy.pdf',width=5,height=7)
+plot_data<-subset(res_posttrim_melted,
+                  !animal_id%in%c('PC','NTC','NC')&!tissue%in%c('NA',NA)&
+                    day=='Day 7 (biopsy)')
+ggplot(plot_data,aes(x=tissue_val,y=value/tot_reads*100))+
+      geom_bar(stat='identity',aes(fill=bc))+
+      facet_grid(animal_id~.)+scale_fill_manual(values=getPalette(11))+
+      theme_bw()+
+      theme(axis.text.x=element_text(angle=90,hjust=1))+
+      xlab('')+ylab('% of total reads')+
+      ggtitle(unique(plot_data$day))
+  ggplot(plot_data,aes(x=tissue_val,y=value/tot_allbc*100))+
+      geom_bar(stat='identity',aes(fill=bc))+
+      facet_grid(animal_id~.)+scale_fill_manual(values=getPalette(11))+
+      theme_bw()+
+      theme(axis.text.x=element_text(angle=90,hjust=1))+
+      xlab('')+ylab('% of total reads with any bc')+
+      ggtitle(unique(plot_data$day))
+dev.off()
+
+
+pdf('./D23_necropsy.pdf',width=7,height=7)
+plot_data<-subset(res_posttrim_melted,
+                  !animal_id%in%c('PC','NTC','NC')&!tissue%in%c('NA',NA)&
+                    day=='Day 23 (necropsy)')
+ggplot(plot_data,aes(x=tissue_val,y=value/tot_reads*100))+
+      geom_bar(stat='identity',aes(fill=bc))+
+      facet_grid(animal_id~.)+scale_fill_manual(values=getPalette(11))+
+      theme_bw()+
+      theme(axis.text.x=element_text(angle=90,hjust=1))+
+      xlab('')+ylab('% of total reads')+
+      ggtitle(unique(plot_data$day))
+  ggplot(plot_data,aes(x=tissue_val,y=value/tot_allbc*100))+
+      geom_bar(stat='identity',aes(fill=bc))+
+      facet_grid(animal_id~.)+scale_fill_manual(values=getPalette(11))+
+      theme_bw()+
+      theme(axis.text.x=element_text(angle=90,hjust=1))+
+      xlab('')+ylab('% of total reads with any bc')+
+      ggtitle(unique(plot_data$day))
+dev.off()
+
+
+pdf('./PBMC.pdf',width=7,height=5)
+plot_data<-subset(res_posttrim_melted,
+                  !animal_id%in%c('PC','NTC','NC')&!tissue%in%c('NA',NA)&
+                    tissue_val=='PBMC') %>% 
+  mutate(t_day=as.numeric(str_split(day,' ',simplify=T)[,2]))
+ggplot(plot_data,aes(x=t_day,y=value/tot_reads*100))+
+      geom_bar(stat='identity',aes(fill=bc))+
+      facet_grid(animal_id~.)+scale_fill_manual(values=getPalette(11))+
+      theme_bw()+
+      theme(axis.text.x=element_text(angle=90,hjust=1))+
+      xlab('')+ylab('% of total reads')+
+      ggtitle('in PBMC over time')
+  ggplot(plot_data,aes(x=t_day,y=value/tot_allbc*100))+
+      geom_bar(stat='identity',aes(fill=bc))+
+      facet_grid(animal_id~.)+scale_fill_manual(values=getPalette(11))+
+      theme_bw()+
+      theme(axis.text.x=element_text(angle=90,hjust=1))+
+      xlab('')+ylab('% of total reads with any bc')+
+      ggtitle('in PBMC over time')
+dev.off()
+
+```
